@@ -43,6 +43,7 @@ and then run `alembic revision --autogenerate`
   * [Deletion of enums values](#deletion-of-enums-values)
   * [Renaming of enum values](#rename-enum-value)
 * [Partial index preservation](#partial-index-preservation)
+* [CHECK constraint preservation](#check-constraint-preservation)
 * [Omitting managing enums](#omitting-managing-enums)
 
 ## Creation of enum<a id="creation-of-enum"></a>
@@ -361,6 +362,53 @@ To resolve this issue, either:
 2. Manually drop the index 'idx_users' before running this migration
 3. Update your code to not drop these enum values
 ```
+
+
+## CHECK constraint preservation<a id="check-constraint-preservation"></a>
+
+CHECK constraints whose expression compares the enum column are preserved the same way: dropped before the columns
+move to the new type and recreated from their definitions afterwards. Without this the constraint gets bound to the
+temporary comparison operator between the new and the old type, and dropping that operator fails with
+`DependentObjectsStillExist` (or, before 1.9.0, silently drops the constraint) — see
+[issue #134](https://github.com/Pogchamp-company/alembic-postgresql-enum/issues/134).
+
+```python
+class User(Base):
+    __tablename__ = "user"
+    id = Column(Integer, primary_key=True)
+    status = Column(postgresql.ENUM(UserStatus))
+    deleted_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("(status = 'deleted') = (deleted_at IS NOT NULL)", name="ck_user_deleted_at"),
+    )
+```
+
+Like indexes, the constraints are found at migration generation time and passed to the migration, so it runs in
+offline mode too. A migration without the parameter (written by hand or generated before it existed) finds them in
+the database when it runs online. Renamed values (`enum_values_to_rename`) are renamed in the definitions as well.
+
+```python
+from alembic_postgresql_enum.sql_commands.check_constraints import TableCheckConstraint
+
+op.sync_enum_values(
+    enum_schema='public',
+    enum_name='userstatus',
+    new_values=['active', 'deleted', 'pending'],
+    affected_columns=[TableReference(...)],
+    enum_values_to_rename=[],
+    check_constraints_to_recreate=[
+        TableCheckConstraint(
+            table='public."user"',
+            name='ck_user_deleted_at',
+            definition="CHECK (((status = 'deleted'::userstatus) = (deleted_at IS NOT NULL)))",
+        ),
+    ],
+)
+```
+
+A constraint referring to a value that is deleted (not renamed) cannot be recreated: the migration fails, and the
+constraint has to be changed first.
 
 ## Omitting managing enums<a id="omitting-managing-enums"></a>
 

@@ -15,6 +15,13 @@ from alembic_postgresql_enum.sql_commands.column_default import (
     rename_default_if_required,
     set_default,
 )
+from alembic_postgresql_enum.sql_commands.check_constraints import (
+    TableCheckConstraint,
+    drop_check_constraints,
+    get_dependent_check_constraints,
+    recreate_check_constraints,
+    transform_check_constraints_for_renamed_values,
+)
 from alembic_postgresql_enum.sql_commands.comparison_operators import (
     create_comparison_operators,
     drop_comparison_operators,
@@ -53,6 +60,7 @@ class SyncEnumValuesOp(alembic.operations.ops.MigrateOperation):
         new_values: List[str],
         affected_columns: List[TableReference],
         affected_indexes: List[TableIndex] = None,
+        affected_check_constraints: List[TableCheckConstraint] = None,
     ):
         self.schema = schema
         self.name = name
@@ -60,6 +68,7 @@ class SyncEnumValuesOp(alembic.operations.ops.MigrateOperation):
         self.new_values = new_values
         self.affected_columns = affected_columns
         self.indexes_to_recreate = affected_indexes or []
+        self.check_constraints_to_recreate = affected_check_constraints or []
 
     def reverse(self):
         """
@@ -72,6 +81,7 @@ class SyncEnumValuesOp(alembic.operations.ops.MigrateOperation):
             new_values=self.old_values,
             affected_columns=self.affected_columns,
             affected_indexes=self.indexes_to_recreate,
+            affected_check_constraints=self.check_constraints_to_recreate,
         )
 
     @classmethod
@@ -84,6 +94,7 @@ class SyncEnumValuesOp(alembic.operations.ops.MigrateOperation):
         affected_columns: List[TableReference],
         enum_values_to_rename: List[Tuple[str, str]],
         indexes_to_recreate: List[TableIndex],
+        check_constraints: Optional[List[TableCheckConstraint]] = None,
     ):
         enum_type_name = f'"{enum_schema}"."{enum_name}"'
         temporary_enum_name = f'"{enum_name}_old"'
@@ -93,6 +104,16 @@ class SyncEnumValuesOp(alembic.operations.ops.MigrateOperation):
             indexes_to_recreate = transform_indexes_for_renamed_values(
                 indexes_to_recreate, enum_name, enum_values_to_rename, enum_schema
             )
+
+        # Not given by the migration (written by hand or before this parameter): found in the database while the type
+        # still has its name; their definitions then refer to the new type (issue #134).
+        if check_constraints is None:
+            check_constraints = get_dependent_check_constraints(connection, enum_schema, enum_name)
+        if check_constraints and enum_values_to_rename:
+            check_constraints = transform_check_constraints_for_renamed_values(
+                check_constraints, enum_name, enum_values_to_rename, enum_schema
+            )
+        drop_check_constraints(connection, check_constraints)
 
         rename_type(connection, enum_type_name, temporary_enum_name)
         create_type(connection, enum_type_name, new_values)
@@ -129,6 +150,7 @@ class SyncEnumValuesOp(alembic.operations.ops.MigrateOperation):
         drop_type(connection, temporary_enum_type_name)
 
         recreate_indexes(connection, indexes_to_recreate)
+        recreate_check_constraints(connection, check_constraints)
 
     @classmethod
     def sync_enum_values(
@@ -140,6 +162,7 @@ class SyncEnumValuesOp(alembic.operations.ops.MigrateOperation):
         affected_columns: List[Tuple[str, str]],
         enum_values_to_rename: Iterable[Tuple[str, str]] = tuple(),
         indexes_to_recreate: Optional[List[TableIndex]] = None,
+        check_constraints_to_recreate: Optional[List[TableCheckConstraint]] = None,
     ):
         """
         Replace enum values with `new_values`
@@ -167,6 +190,10 @@ class SyncEnumValuesOp(alembic.operations.ops.MigrateOperation):
             These are indexes that depend on the enum type and will be dropped and recreated
             during the migration. This parameter should be provided at migration generation time
             to support offline mode.
+        :param check_constraints_to_recreate:
+            List of TableCheckConstraint objects: CHECK constraints whose expression uses the enum type. They are
+            dropped before the columns move to the new type and recreated afterwards. Provided at migration
+            generation time to support offline mode; when omitted, they are found in the database (online only).
         """
 
         config = get_configuration()
@@ -221,6 +248,11 @@ class SyncEnumValuesOp(alembic.operations.ops.MigrateOperation):
                 table_references,
                 enum_values_to_rename,
                 indexes_to_recreate or [],
+                (
+                    check_constraints_to_recreate
+                    if check_constraints_to_recreate is not None or not operations.migration_context.as_sql
+                    else []
+                ),
             )
 
     def to_diff_tuple(self) -> Tuple[Any, ...]:
@@ -246,6 +278,10 @@ def render_sync_enum_value_op(autogen_context: AutogenContext, op: SyncEnumValue
 
     if op.indexes_to_recreate:
         autogen_context.imports.add("from alembic_postgresql_enum.sql_commands.indexes import TableIndex")
+    if op.check_constraints_to_recreate:
+        autogen_context.imports.add(
+            "from alembic_postgresql_enum.sql_commands.check_constraints import TableCheckConstraint"
+        )
 
     lines = [
         f"{alembic_module_prefix}sync_enum_values({config.type_ignore_comment if config.add_type_ignore else ''}",
@@ -262,6 +298,16 @@ def render_sync_enum_value_op(autogen_context: AutogenContext, op: SyncEnumValue
             lines.append(f"        TableIndex(")
             lines.append(f"            name={index.name!r},")
             lines.append(f"            definition={index.definition!r},")
+            lines.append(f"        ),")
+        lines.append(f"    ],")
+
+    if op.check_constraints_to_recreate:
+        lines.append(f"    check_constraints_to_recreate=[")
+        for constraint in op.check_constraints_to_recreate:
+            lines.append(f"        TableCheckConstraint(")
+            lines.append(f"            table={constraint.table!r},")
+            lines.append(f"            name={constraint.name!r},")
+            lines.append(f"            definition={constraint.definition!r},")
             lines.append(f"        ),")
         lines.append(f"    ],")
 

@@ -8,6 +8,7 @@ from sqlalchemy import MetaData
 from sqlalchemy.dialects import postgresql
 
 from alembic_postgresql_enum import ColumnType, TableReference
+from alembic_postgresql_enum.sql_commands.check_constraints import TableCheckConstraint
 from tests.utils.migration_context import create_migration_context
 
 if TYPE_CHECKING:
@@ -57,6 +58,7 @@ def compare_and_run(
             "postgresql": postgresql,
             "ColumnType": ColumnType,
             "TableReference": TableReference,
+            "TableCheckConstraint": TableCheckConstraint,
         },
     )
     exec(
@@ -67,5 +69,6 @@ def compare_and_run(
             "postgresql": postgresql,
             "ColumnType": ColumnType,
             "TableReference": TableReference,
+            "TableCheckConstraint": TableCheckConstraint,
         },
     )

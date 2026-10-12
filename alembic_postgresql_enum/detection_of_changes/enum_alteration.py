@@ -16,6 +16,7 @@ from alembic_postgresql_enum.get_enum_data import (
 )
 from alembic_postgresql_enum.operations.sync_enum_values import SyncEnumValuesOp
 from alembic_postgresql_enum.configuration import get_configuration
+from alembic_postgresql_enum.sql_commands.check_constraints import get_dependent_check_constraints
 from alembic_postgresql_enum.sql_commands.indexes import get_dependent_indexes
 
 if TYPE_CHECKING:
@@ -59,6 +60,7 @@ def sync_changed_enums(
         affected_columns = table_references[enum_name]
 
         affected_indexes = get_dependent_indexes(connection, schema, enum_name)
+        affected_check_constraints = get_dependent_check_constraints(connection, schema, enum_name)
 
         op = SyncEnumValuesOp(
             schema,
@@ -70,5 +72,6 @@ def sync_changed_enums(
                 key=lambda reference: (reference.table_schema, reference.table_name, reference.column_name),
             ),
             sorted(affected_indexes, key=lambda index: index.name),
+            affected_check_constraints,
         )
         upgrade_ops.ops.append(op)
